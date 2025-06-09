@@ -42,19 +42,25 @@ rollout MotionReverseTool "MotionReverse 工具" width:400 height:600
             return undefined
         )
         
-        local url = apiBaseUrl + "/contents/" + path
-        local webClient = dotNetObject "System.Net.WebClient"
-        webClient.Headers.Add "User-Agent" "MotionReverse-Tool"
-        webClient.Headers.Add "Accept" "application/vnd.github.v3+json"
-        
         try
         (
-            local response = webClient.DownloadString url
-            local json = dotNetObject "System.Web.Script.Serialization.JavaScriptSerializer"
-            local result = json.DeserializeObject response
-            local content = dotNetClass "System.Convert".FromBase64String result.content
-            local encoding = dotNetClass "System.Text.Encoding".UTF8
-            encoding.GetString content
+            -- 构建正确的raw.githubusercontent.com URL
+            local repoPath = substituteString apiBaseUrl "https://api.github.com/repos/" ""
+            local rawUrl = "https://raw.githubusercontent.com/" + repoPath + "/main/" + path
+            
+            local webClient = dotNetObject "System.Net.WebClient"
+            webClient.Headers.Add "User-Agent" "MotionReverse-Tool"
+            
+            local response = webClient.DownloadString rawUrl
+            if response == undefined or response == "" then
+            (
+                messageBox ("获取文件内容为空: " + rawUrl) title:"错误"
+                undefined
+            )
+            else
+            (
+                response
+            )
         )
         catch
         (
@@ -67,12 +73,12 @@ rollout MotionReverseTool "MotionReverse 工具" width:400 height:600
             )
             else if matchPattern errorMsg pattern:"*404*" then
             (
-                messageBox ("文件不存在: " + path) title:"错误"
+                messageBox ("文件不存在: " + path + "\n完整URL: " + rawUrl) title:"错误"
                 undefined
             )
             else
             (
-                messageBox ("获取文件失败: " + errorMsg + "\n正在重试...") title:"错误"
+                messageBox ("获取文件失败: " + errorMsg + "\n完整URL: " + rawUrl + "\n正在重试...") title:"错误"
                 wait retryDelay
                 getGitHubFileContent path retryCount:(retryCount + 1)
             )
@@ -82,9 +88,21 @@ rollout MotionReverseTool "MotionReverse 工具" width:400 height:600
     -- 从远程获取配置
     fn getRemoteConfig = 
     (
-        local configContent = getGitHubFileContent "MotionReverse_Config.ini"
-        if configContent != undefined then
+        try
         (
+            -- 使用GitHub API获取raw内容
+            local url = apiBaseUrl + "/contents/MotionReverse_Config.ini"
+            local webClient = dotNetObject "System.Net.WebClient"
+            webClient.Headers.Add "User-Agent" "MotionReverse-Tool"
+            webClient.Headers.Add "Accept" "application/vnd.github.v3.raw"
+            
+            local configContent = webClient.DownloadString url
+            if configContent == undefined or configContent == "" then
+            (
+                messageBox "无法获取配置文件内容" title:"错误"
+                return false
+            )
+            
             scripts = #()
             local lines = filterString configContent "\n"
             for line in lines do
@@ -98,19 +116,27 @@ rollout MotionReverseTool "MotionReverse 工具" width:400 height:600
                         if scriptInfo.count == 3 then
                         (
                             append scripts #(
-                                parts[1],
-                                scriptInfo[1],
-                                scriptInfo[2],
-                                scriptInfo[3]
+                                trimRight (trimLeft parts[1]),
+                                trimRight (trimLeft scriptInfo[1]),
+                                trimRight (trimLeft scriptInfo[2]),
+                                trimRight (trimLeft scriptInfo[3])
                             )
                         )
                     )
                 )
             )
+            
+            if scripts.count == 0 then
+            (
+                messageBox "配置文件格式错误：没有找到有效的脚本配置" title:"错误"
+                return false
+            )
+            
             true
         )
-        else
+        catch
         (
+            messageBox ("获取配置文件时发生错误: " + (getCurrentException())) title:"错误"
             false
         )
     )
@@ -132,20 +158,40 @@ rollout MotionReverseTool "MotionReverse 工具" width:400 height:600
         try
         (
             local response = webClient.DownloadString url
-            local json = dotNetObject "System.Web.Script.Serialization.JavaScriptSerializer"
-            local result = json.DeserializeObject response
             local scriptFiles = #()
+            local lines = filterString response "\n"
+            local currentName = undefined
             
-            if classOf result != Array then
+            for line in lines do
             (
-                throw "Invalid response format"
-            )
-            
-            for item in result do
-            (
-                if matchPattern item.name pattern:"*.ms" do
+                if matchPattern line pattern:"*\"name\":*" then
                 (
-                    append scriptFiles #(item.name, item.download_url)
+                    local nameStart = findString line "\"name\":"
+                    if nameStart != undefined then
+                    (
+                        local nameStr = substring line (nameStart + 8) -1
+                        nameStr = substituteString nameStr "\"" ""
+                        nameStr = substituteString nameStr "," ""
+                        nameStr = trimRight (trimLeft nameStr)
+                        -- 只匹配.ms文件，排除.ini文件
+                        if matchPattern nameStr pattern:"*.ms" and not matchPattern nameStr pattern:"*.ini" do
+                        (
+                            currentName = nameStr
+                        )
+                    )
+                )
+                else if matchPattern line pattern:"*\"download_url\":*" and currentName != undefined then
+                (
+                    local urlStart = findString line "\"download_url\":"
+                    if urlStart != undefined then
+                    (
+                        local urlStr = substring line (urlStart + 15) -1
+                        urlStr = substituteString urlStr "\"" ""
+                        urlStr = substituteString urlStr "," ""
+                        urlStr = trimRight (trimLeft urlStr)
+                        append scriptFiles #(currentName, urlStr)
+                        currentName = undefined
+                    )
                 )
             )
             scriptFiles
@@ -174,24 +220,46 @@ rollout MotionReverseTool "MotionReverse 工具" width:400 height:600
     )
     
     -- 下载脚本到临时目录
-    fn downloadScriptToTemp scriptName = 
+    fn downloadScriptToTemp scriptName retryCount:0 = 
     (
-        local scriptContent = getGitHubFileContent ("ms/" + scriptName)
-        if scriptContent != undefined then
+        if retryCount >= maxRetries then
         (
-            -- 确保临时目录存在
-            makeDir tempDir
+            messageBox ("下载脚本失败，已达到最大重试次数: " + scriptName) title:"错误"
+            return undefined
+        )
+        
+        try
+        (
+            -- 构建正确的raw.githubusercontent.com URL
+            local repoPath = substituteString apiBaseUrl "https://api.github.com/repos/" ""
+            local url = "https://raw.githubusercontent.com/" + repoPath + "/main/ms/" + scriptName
             
-            -- 保存到临时文件
-            local tempFile = tempDir + scriptName
-            local file = createFile tempFile
-            format "%" scriptContent to:file
-            close file
+            local webClient = dotNetObject "System.Net.WebClient"
+            webClient.Headers.Add "User-Agent" "MotionReverse-Tool"
+            
+            local tempFile = getTempFileName()
+            webClient.DownloadFile url tempFile
             tempFile
         )
-        else
+        catch
         (
-            undefined
+            local errorMsg = getCurrentException()
+            if matchPattern errorMsg pattern:"*429*" then
+            (
+                messageBox "GitHub API访问受限，正在等待重试..." title:"提示"
+                wait retryDelay
+                downloadScriptToTemp scriptName retryCount:(retryCount + 1)
+            )
+            else if matchPattern errorMsg pattern:"*404*" then
+            (
+                undefined
+            )
+            else
+            (
+                messageBox ("下载脚本失败: " + errorMsg + "\n完整URL: " + url + "\n正在重试...") title:"错误"
+                wait retryDelay
+                downloadScriptToTemp scriptName retryCount:(retryCount + 1)
+            )
         )
     )
     
@@ -238,14 +306,13 @@ rollout MotionReverseTool "MotionReverse 工具" width:400 height:600
         if scriptList.SelectedItems.Count > 0 then
         (
             local scriptName = scriptList.SelectedItems.Item[0].Text
-            local scriptFile = downloadScriptToTemp (scriptName + "_BulletS.ms")
+            local scriptFile = downloadScriptToTemp (scriptName + ".ms")
             
             if scriptFile != undefined then
             (
                 try
                 (
                     fileIn scriptFile
-                    -- 运行完成后清理临时文件
                     cleanupTempFiles()
                 )
                 catch
@@ -255,7 +322,7 @@ rollout MotionReverseTool "MotionReverse 工具" width:400 height:600
             )
             else
             (
-                messageBox ("无法获取脚本文件: " + scriptName) title:"错误"
+                messageBox ("无法获取脚本文件: " + scriptName + ".ms") title:"错误"
             )
         )
     )
