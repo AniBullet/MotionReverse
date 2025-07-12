@@ -264,7 +264,7 @@ public class FBXTakeExporterWindow : EditorWindow
 
                 // 创建临时对象
                 tempRoot = GameObject.Instantiate(fbxObject);
-                tempRoot.name = fbxObject.name;
+                tempRoot.name = "Root";
 
                 // 移除所有Animation/Animator组件，重新挂载Animator
                 foreach (var anim in tempRoot.GetComponentsInChildren<Animation>())
