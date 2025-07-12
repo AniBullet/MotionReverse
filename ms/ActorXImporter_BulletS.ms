@@ -514,6 +514,32 @@ fn axFindFile path filename recurse:false =
 	res
 )
 
+fn axFindAllPsaFiles path =
+(
+	local psaFiles = #()
+	local pattern = path + "\\*.psa"
+	local files = getFiles pattern
+	
+	-- 添加当前文件夹中的PSA文件
+	for file in files do
+	(
+		append psaFiles file
+	)
+	
+	-- 递归搜索子文件夹
+	local dirs = getDirectories (path + "\\*")
+	for dir in dirs do
+	(
+		local subPsaFiles = axFindAllPsaFiles dir
+		for subFile in subPsaFiles do
+		(
+			append psaFiles subFile
+		)
+	)
+	
+	psaFiles
+)
+
 
 fn axGetRootMatrix =
 (
@@ -2159,7 +2185,8 @@ rollout axAnimImportRollout "Animation Import"
 (
 	Group "Animation Import"
 	(
-		button   BtnImportPsa  "Import PSA ..."
+		button   BtnImportPsa  "Import PSA ..." across:2
+		button   BtnImportFolder "Import Folder ..." tooltip:"Import all PSA files from selected folder and subfolders"
 		listbox  LstAnims      "Animations:"     height:13
 		checkbox ChkAnimTime   "Update animation length" checked:g_updateTime
 		checkbox ChkFixLooping "Fix loop animation" checked:g_fixLooping tooltip:"Append 1st keyframe to animation\ntrack for smooth loop"
@@ -2193,6 +2220,41 @@ rollout axAnimImportRollout "Animation Import"
 				)
 			)
 			LstAnims.items = for a in AnimEntries collect (a.Name + " [" + (a.NumRawFrames as string) + "]")
+		)
+	)
+
+	on BtnImportFolder pressed do
+	(
+		local folderPath = getSavePath caption:"选择包含PSA文件的文件夹" initialDir:g_lastDir2
+		if folderPath != undefined then
+		(
+			local psaFiles = axFindAllPsaFiles folderPath
+			if psaFiles.count > 0 then
+			(
+				AnimEntries = #()
+				format "找到 % 个PSA文件\n" psaFiles.count
+				for filename in psaFiles do
+				(
+					AnimFileName = filename
+					g_lastDir2 = getFilenamePath AnimFileName
+					format "正在加载: %\n" (getFilenameFile AnimFileName)
+					ImportPsaFile AnimFileName -1
+					if Anims != undefined do
+					(
+						for i = 1 to Anims.count do
+						(
+							local a = Anims[i]
+							append AnimEntries (AnimEntry Name:a.Name NumRawFrames:a.NumRawFrames PsaFile:AnimFileName AnimIndex:i)
+						)
+					)
+				)
+				LstAnims.items = for a in AnimEntries collect (a.Name + " [" + (a.NumRawFrames as string) + "]")
+				format "完成加载，共导入 % 个动画\n" AnimEntries.count
+			)
+			else
+			(
+				messageBox "在选定的文件夹及其子文件夹中未找到任何PSA文件。"
+			)
 		)
 	)
 
