@@ -14,21 +14,36 @@ public class FBXTakeExporterWindow : EditorWindow
     private const string SessionKeyFBXPath = "FBXTakeExporter_LastFBXPath";
     private const string SessionKeyOutName = "FBXTakeExporter_LastOutputName";
     private const string SessionKeyExportDir = "FBXTakeExporter_ExportDir";
+    private const string SessionKeyAnimDir = "FBXTakeExporter_AnimDir";
+    private const string SessionKeyExportMode = "FBXTakeExporter_ExportMode";
 
     private string     fbxAssetPath   = "Assets/Models/MyModel.fbx";
     private GameObject fbxObject;
     private string     outputFileName = "FBX_TakeNames.txt";
     private string     exportFolder   = "Assets/ExportedFBX";
+    private string     animFolder     = "Assets/Animations";
     private Vector2    scrollPos;
     private List<string> takeNames = new List<string>();
     private List<bool>   takeToggle = new List<bool>();
     private bool exportMesh = true; // 新增：是否导出模型网格
+    
+    // 新增：导出模式选择
+    private enum ExportMode
+    {
+        Embedded,   // 内嵌模式（原有模式）
+        Separate    // 分离模式（新增模式）
+    }
+    private ExportMode exportMode = ExportMode.Embedded;
+    
+    // 新增：分离模式下的动画剪辑列表
+    private List<AnimationClip> animClips = new List<AnimationClip>();
+    private List<bool> animClipToggle = new List<bool>();
 
     [MenuItem("Tools/FBX Take Exporter Window")]
     public static void OpenWindow()
     {
         var w = GetWindow<FBXTakeExporterWindow>("FBX Take Exporter");
-        w.minSize = new Vector2(520, 400);
+        w.minSize = new Vector2(700, 500);
         w.LoadSession();
         w.RefreshClips();
     }
@@ -39,6 +54,35 @@ public class FBXTakeExporterWindow : EditorWindow
     private void OnGUI()
     {
         GUILayout.Label("FBX Take Exporter", EditorStyles.boldLabel);
+        EditorGUILayout.Space();
+
+        // 新增：导出模式选择
+        EditorGUILayout.BeginHorizontal();
+        GUILayout.Label("导出模式：", GUILayout.Width(80));
+        var newMode = (ExportMode)EditorGUILayout.EnumPopup(exportMode);
+        if (newMode != exportMode)
+        {
+            exportMode = newMode;
+            SaveSession();
+            RefreshClips();
+        }
+        EditorGUILayout.EndHorizontal();
+        
+        EditorGUILayout.Space();
+
+        if (exportMode == ExportMode.Embedded)
+        {
+            DrawEmbeddedMode();
+        }
+        else
+        {
+            DrawSeparateMode();
+        }
+    }
+
+    private void DrawEmbeddedMode()
+    {
+        GUILayout.Label("内嵌模式 - 从FBX文件导出动画剪辑", EditorStyles.boldLabel);
         EditorGUILayout.Space();
 
         DrawFbxSelector();
@@ -102,6 +146,99 @@ public class FBXTakeExporterWindow : EditorWindow
         EditorGUILayout.EndHorizontal();
     }
 
+    private void DrawSeparateMode()
+    {
+        GUILayout.Label("分离模式 - 从动画文件目录导出FBX", EditorStyles.boldLabel);
+        EditorGUILayout.Space();
+
+        // 模型选择
+        DrawFbxSelector();
+
+        EditorGUILayout.Space();
+        
+        // 动画目录选择
+        GUILayout.Label("动画文件目录：", EditorStyles.label);
+        EditorGUILayout.BeginHorizontal();
+        animFolder = EditorGUILayout.TextField(animFolder);
+        if (GUILayout.Button("选择", GUILayout.Width(60)))
+        {
+            string selected = EditorUtility.OpenFolderPanel("选择动画文件目录", Application.dataPath, "");
+            if (!string.IsNullOrEmpty(selected))
+            {
+                if (selected.StartsWith(Application.dataPath))
+                    animFolder = "Assets" + selected.Substring(Application.dataPath.Length);
+                RefreshAnimClips();
+            }
+        }
+        EditorGUILayout.EndHorizontal();
+
+        // 导出目录选择
+        GUILayout.Label("导出目录：", EditorStyles.label);
+        EditorGUILayout.BeginHorizontal();
+        exportFolder = EditorGUILayout.TextField(exportFolder);
+        if (GUILayout.Button("选择", GUILayout.Width(60)))
+        {
+            string selected = EditorUtility.OpenFolderPanel("选择导出目录", Application.dataPath, "");
+            if (!string.IsNullOrEmpty(selected))
+            {
+                if (selected.StartsWith(Application.dataPath))
+                    exportFolder = "Assets" + selected.Substring(Application.dataPath.Length);
+            }
+        }
+        EditorGUILayout.EndHorizontal();
+
+        // 是否导出模型网格
+        exportMesh = EditorGUILayout.ToggleLeft("导出模型网格（不勾选则只导出骨架+动画）", exportMesh);
+
+        EditorGUILayout.Space();
+        
+        // 刷新动画剪辑按钮
+        if (GUILayout.Button("刷新动画剪辑列表", GUILayout.Height(25)))
+        {
+            RefreshAnimClips();
+        }
+
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("全选所有剪辑", GUILayout.Height(25)))
+        {
+            for (int i = 0; i < animClipToggle.Count; i++) animClipToggle[i] = true;
+        }
+        if (GUILayout.Button("取消全选", GUILayout.Height(25)))
+        {
+            for (int i = 0; i < animClipToggle.Count; i++) animClipToggle[i] = false;
+        }
+        EditorGUILayout.EndHorizontal();
+
+        GUILayout.Label("动画剪辑：", EditorStyles.label);
+        scrollPos = EditorGUILayout.BeginScrollView(scrollPos, GUILayout.Height(150));
+        for (int i = 0; i < animClips.Count; i++)
+        {
+            var clip = animClips[i];
+            if (clip != null)
+            {
+                EditorGUILayout.BeginHorizontal();
+                // 增加名称显示宽度，确保完整显示
+                animClipToggle[i] = EditorGUILayout.ToggleLeft(clip.name, animClipToggle[i], GUILayout.Width(350));
+                EditorGUILayout.LabelField($"长度: {clip.length:F2}s", GUILayout.Width(80));
+                // 添加路径信息以便调试
+                EditorGUILayout.LabelField($"路径: {AssetDatabase.GetAssetPath(clip)}", EditorStyles.miniLabel);
+                EditorGUILayout.EndHorizontal();
+            }
+        }
+        EditorGUILayout.EndScrollView();
+
+        EditorGUILayout.Space();
+        EditorGUILayout.BeginHorizontal();
+#if UNITY_2020_3_OR_NEWER
+        GUI.enabled = fbxObject != null && animClips.Count > 0;
+        if (GUILayout.Button("导出所有选中动画", GUILayout.Height(30))) ExportSelectedAnimClips();
+        GUI.enabled = true;
+#else
+        if (GUILayout.Button("导出所有选中动画", GUILayout.Height(30))) ShowExportInstructions();
+#endif
+        EditorGUILayout.EndHorizontal();
+    }
+
     private void DrawFbxSelector()
     {
         var dropRect = GUILayoutUtility.GetRect(0, 50, GUILayout.ExpandWidth(true));
@@ -157,6 +294,8 @@ public class FBXTakeExporterWindow : EditorWindow
         fbxAssetPath   = SessionState.GetString(SessionKeyFBXPath, fbxAssetPath);
         outputFileName = SessionState.GetString(SessionKeyOutName, outputFileName);
         exportFolder   = SessionState.GetString(SessionKeyExportDir, exportFolder);
+        animFolder     = SessionState.GetString(SessionKeyAnimDir, animFolder);
+        exportMode     = (ExportMode)SessionState.GetInt(SessionKeyExportMode, (int)exportMode);
         if (!string.IsNullOrEmpty(fbxAssetPath))
             fbxObject = AssetDatabase.LoadAssetAtPath<GameObject>(fbxAssetPath);
     }
@@ -166,6 +305,8 @@ public class FBXTakeExporterWindow : EditorWindow
         SessionState.SetString(SessionKeyFBXPath, fbxAssetPath);
         SessionState.SetString(SessionKeyOutName, outputFileName);
         SessionState.SetString(SessionKeyExportDir, exportFolder);
+        SessionState.SetString(SessionKeyAnimDir, animFolder);
+        SessionState.SetInt(SessionKeyExportMode, (int)exportMode);
     }
 
     private void RefreshClips()
@@ -181,6 +322,29 @@ public class FBXTakeExporterWindow : EditorWindow
             takeNames.Add(ci.name);
             takeToggle.Add(false);
         }
+    }
+
+    private void RefreshAnimClips()
+    {
+        animClips.Clear(); 
+        animClipToggle.Clear();
+        if (string.IsNullOrEmpty(animFolder)) return;
+        
+        // 使用AssetDatabase来获取目录下的所有动画剪辑
+        string[] guids = AssetDatabase.FindAssets("t:AnimationClip", new string[] { animFolder });
+        foreach (string guid in guids)
+        {
+            string assetPath = AssetDatabase.GUIDToAssetPath(guid);
+            AnimationClip clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(assetPath);
+            if (clip != null)
+            {
+                animClips.Add(clip);
+                animClipToggle.Add(false);
+                Debug.Log($"找到动画剪辑: {clip.name} 在路径: {assetPath}");
+            }
+        }
+        
+        Debug.Log($"总共找到 {animClips.Count} 个动画剪辑");
     }
 
     private void ExportTakeNames()
@@ -311,15 +475,10 @@ public class FBXTakeExporterWindow : EditorWindow
                     ModelImporter exportedImporter = AssetImporter.GetAtPath(outPath) as ModelImporter;
                     if (exportedImporter != null)
                     {
-                        // 基本设置
-                        exportedImporter.animationType = modelImporter.animationType;
+                        // 基本设置 - 只处理Generic类型
+                        exportedImporter.animationType = ModelImporterAnimationType.Generic;
                         exportedImporter.importAnimation = true;
                         exportedImporter.animationCompression = ModelImporterAnimationCompression.Off;
-                        
-                        if (modelImporter.animationType == ModelImporterAnimationType.Human)
-                        {
-                            exportedImporter.avatarSetup = ModelImporterAvatarSetup.CreateFromThisModel;
-                        }
                         
                         exportedImporter.SaveAndReimport();
                     }
@@ -350,6 +509,128 @@ public class FBXTakeExporterWindow : EditorWindow
         {
             AssetDatabase.Refresh();
             EditorUtility.DisplayDialog("导出完成", $"成功导出 {successCount}/{clipNames.Count} 个 FBX 到:\n{exportFolder}", "确定");
+        }
+        else
+        {
+            EditorUtility.DisplayDialog("导出失败", "未能成功导出任何 FBX 文件", "确定");
+        }
+    }
+
+    private void ExportSelectedAnimClips()
+    {
+        var selectedClips = animClips.Where((c, i) => animClipToggle[i]).ToList();
+        if (selectedClips.Count == 0)
+        {
+            EditorUtility.DisplayDialog("错误", "未选择任何动画剪辑", "确定");
+            return;
+        }
+
+        if (!Directory.Exists(exportFolder)) 
+        {
+            Directory.CreateDirectory(exportFolder);
+        }
+
+        // 获取原始FBX信息
+        ModelImporter modelImporter = AssetImporter.GetAtPath(fbxAssetPath) as ModelImporter;
+        if (modelImporter == null)
+        {
+            EditorUtility.DisplayDialog("错误", "无法获取FBX模型导入器", "确定");
+            return;
+        }
+        
+        int successCount = 0;
+        foreach (var clip in selectedClips)
+        {
+            string controllerPath = null;
+            GameObject tempRoot = null;
+            try
+            {
+                // 目标文件路径
+                string outPath = Path.Combine(exportFolder, clip.name + ".fbx");
+
+                // 创建临时对象
+                tempRoot = GameObject.Instantiate(fbxObject);
+                tempRoot.name = "Root";
+
+                // 移除所有Animation/Animator组件，重新挂载Animator
+                foreach (var anim in tempRoot.GetComponentsInChildren<Animation>())
+                    GameObject.DestroyImmediate(anim);
+                foreach (var anim in tempRoot.GetComponentsInChildren<Animator>())
+                    GameObject.DestroyImmediate(anim);
+                var animator = tempRoot.AddComponent<Animator>();
+
+                // 移除网格组件（如果不导出网格）
+                if (!exportMesh)
+                {
+                    foreach (var smr in tempRoot.GetComponentsInChildren<SkinnedMeshRenderer>())
+                        GameObject.DestroyImmediate(smr);
+                    foreach (var mr in tempRoot.GetComponentsInChildren<MeshRenderer>())
+                        GameObject.DestroyImmediate(mr);
+                    foreach (var mf in tempRoot.GetComponentsInChildren<MeshFilter>())
+                        GameObject.DestroyImmediate(mf);
+                }
+
+                // 创建临时AnimatorController
+                controllerPath = "Assets/TempController_" + System.Guid.NewGuid().ToString() + ".controller";
+                var controller = AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
+                var stateMachine = controller.layers[0].stateMachine;
+                var state = stateMachine.AddState(clip.name);
+                state.motion = clip;
+                stateMachine.defaultState = state;
+                animator.runtimeAnimatorController = controller;
+
+                // 使用FBX Exporter API导出
+                ExportModelOptions exportSettings = new ExportModelOptions();
+                exportSettings.ExportFormat = ExportFormat.Binary;
+                exportSettings.KeepInstances = false;
+                
+                string result = ModelExporter.ExportObject(outPath, tempRoot, exportSettings);
+                bool success = !string.IsNullOrEmpty(result);
+                
+                if (success)
+                {
+                    Debug.Log($"已导出FBX: {outPath}");
+                    successCount++;
+                    
+                    // 设置导入选项
+                    AssetDatabase.ImportAsset(outPath);
+                    ModelImporter exportedImporter = AssetImporter.GetAtPath(outPath) as ModelImporter;
+                    if (exportedImporter != null)
+                    {
+                        // 基本设置 - 只处理Generic类型
+                        exportedImporter.animationType = ModelImporterAnimationType.Generic;
+                        exportedImporter.importAnimation = true;
+                        exportedImporter.animationCompression = ModelImporterAnimationCompression.Off;
+                        
+                        exportedImporter.SaveAndReimport();
+                    }
+                }
+                else
+                {
+                    Debug.LogError($"导出FBX失败: {outPath}");
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"导出剪辑 {clip.name} 时发生错误：{e.Message}\n{e.StackTrace}");
+            }
+            finally
+            {
+                if (controllerPath != null && AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath) != null)
+                {
+                    AssetDatabase.DeleteAsset(controllerPath);
+                }
+                if (tempRoot != null)
+                {
+                    GameObject.DestroyImmediate(tempRoot);
+                }
+            }
+        }
+
+        if (successCount > 0)
+        {
+            AssetDatabase.Refresh();
+            EditorUtility.DisplayDialog("导出完成", $"成功导出 {successCount}/{selectedClips.Count} 个 FBX 到:\n{exportFolder}", "确定");
         }
         else
         {
